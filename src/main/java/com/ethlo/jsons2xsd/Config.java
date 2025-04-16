@@ -44,6 +44,9 @@ public class Config
     private final String rootElement;
     private final Function<String,String> itemNameMapper;
     private final boolean unwrapArrays;
+    private final String nsPrefix;
+    private final String pathToDefinitions;
+    private final boolean elementsQualified;
 
     public boolean isAttributesQualified()
     {
@@ -108,6 +111,21 @@ public class Config
         return typeMapping.get(key);
     }
 
+    public String getNsPrefix()
+    {
+        return nsPrefix;
+    }
+
+    public String getPathToDefinitions()
+    {
+        return pathToDefinitions;
+    }
+
+    public boolean isElementsQualified()
+    {
+        return elementsQualified;
+    }
+
     public static class Builder
     {
         private String name;
@@ -123,9 +141,19 @@ public class Config
         private Function<String,String> itemNameMapper = Function.identity();
         private boolean unwrapArrays = false;
 
+        private String nsPrefix = "";
+        private String pathToDefinitions;
+        private boolean elementsQuialified = true;
+
         public Builder targetNamespace(String targetNamespace)
         {
             this.targetNamespace = targetNamespace;
+            return this;
+        }
+
+        public Builder nsPrefix(String nsPrefix)
+        {
+            this.nsPrefix = nsPrefix;
             return this;
         }
 
@@ -210,6 +238,16 @@ public class Config
             this.unwrapArrays = unwrapArrays;
             return this;
         }
+
+        public Builder pathToDefinitions(final String pathToDefinitions) {
+            this.pathToDefinitions = pathToDefinitions;
+            return this;
+        }
+
+        public Builder elementsQualified(final boolean b) {
+            this.elementsQuialified = b;
+            return this;
+        }
     }
 
     private Config(Builder builder)
@@ -226,5 +264,8 @@ public class Config
         this.rootElement = builder.rootElement;
         this.itemNameMapper = builder.itemNameMapper;
         this.unwrapArrays = builder.unwrapArrays;
+        this.nsPrefix = builder.nsPrefix;
+        this.pathToDefinitions = builder.pathToDefinitions;
+        this.elementsQualified = builder.elementsQuialified;
     }
 }

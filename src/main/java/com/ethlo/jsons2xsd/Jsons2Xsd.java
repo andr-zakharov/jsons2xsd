@@ -88,6 +88,8 @@ public class Jsons2Xsd
         typeMapping.put("string|style", XsdSimpleType.STRING_VALUE);
     }
 
+    static JsonNode rootNode;
+
     private Jsons2Xsd()
     {
     }
@@ -101,7 +103,7 @@ public class Jsons2Xsd
 
     public static Document convert(Reader jsonSchema, Reader definitionSchema, Config cfg) throws IOException
     {
-        final JsonNode rootNode = mapper.readTree(jsonSchema);
+        rootNode = mapper.readTree(jsonSchema);
         final Element schemaRoot = createDocument(cfg);
 
         final Set<String> neededElements = new LinkedHashSet<>();
@@ -130,10 +132,13 @@ public class Jsons2Xsd
         }
         else
         {
-            definitions = rootNode.path(JSON_DEFINITIONS);
+            final String definitionsPath = Optional.ofNullable(cfg.getPathToDefinitions()).orElse(JSON_DEFINITIONS);
+            definitions = getNodeByPath(definitionsPath, rootNode);
         }
-
-        doIterateDefinitions(neededElements, schemaRoot, definitions, cfg);
+        if (definitions != null)
+        {
+            doIterateDefinitions(null, neededElements, schemaRoot, definitions, cfg);
+        }
 
         if (cfg.isValidateXsdSchema())
         {
@@ -196,7 +201,10 @@ public class Jsons2Xsd
         final Element schemaRoot = element(xsdDoc, "schema");
         schemaRoot.setAttribute("targetNamespace", cfg.getTargetNamespace());
         schemaRoot.setAttribute("xmlns:" + cfg.getNsAlias(), cfg.getTargetNamespace());
-        schemaRoot.setAttribute("elementFormDefault", "qualified");
+        if (cfg.isElementsQualified())
+        {
+            schemaRoot.setAttribute("elementFormDefault", "qualified");
+        }
         if (cfg.isAttributesQualified())
         {
             schemaRoot.setAttribute("attributeFormDefault", "qualified");
@@ -204,13 +212,13 @@ public class Jsons2Xsd
         return schemaRoot;
     }
 
-    private static void doIterateDefinitions(Set<String> neededElements, Element elem, JsonNode node, Config cfg)
+    private static void doIterateDefinitions(String parent, Set<String> neededElements, Element elem, JsonNode node, Config cfg)
     {
         final Iterator<Entry<String, JsonNode>> iter = node.fields();
         while (iter.hasNext())
         {
             final Entry<String, JsonNode> entry = iter.next();
-            final String key = entry.getKey();
+            final String key = mapName(entry.getKey());
             final JsonNode val = entry.getValue();
 
             if (!neededElements.contains(key) && cfg.isIncludeOnlyUsedTypes())
@@ -247,7 +255,31 @@ public class Jsons2Xsd
             {
                 final String xsdType = determineXsdType(cfg, key, val);
                 handleContent(neededElements, val, cfg, xsdType, elem);
-                ((Element)elem.getLastChild()).setAttribute(FIELD_NAME, key);
+                ((Element)elem.getLastChild()).setAttribute(FIELD_NAME, createPath(parent, key));
+            }
+
+            // Recursively process nested definitions at any depth
+            traverseNestedDefinitions(createPath(parent, key), neededElements, elem, val, cfg);
+        }
+    }
+
+    private static void traverseNestedDefinitions(String parent, Set<String> neededElements, Element elem, JsonNode node, Config cfg)
+    {
+        if (node.isObject())
+        {
+            if (node.has(JSON_DEFINITIONS))
+            {
+                doIterateDefinitions(createPath(parent, JSON_DEFINITIONS), neededElements, elem, node.get(JSON_DEFINITIONS), cfg);
+            }
+            for (JsonNode child : node)
+            {
+                traverseNestedDefinitions(parent, neededElements, elem, child, cfg);
+            }
+        } else if (node.isArray())
+        {
+            for (JsonNode child : node)
+            {
+                traverseNestedDefinitions(parent, neededElements, elem, child, cfg);
             }
         }
     }
@@ -274,16 +306,17 @@ public class Jsons2Xsd
     {
         final Element complexTypeElem = element(elem, XSD_COMPLEXTYPE);
         final Element choiceElem = element(complexTypeElem, XSD_CHOICE);
+        int i = 0;
         for (JsonNode e : oneOf)
         {
             final Element nodeElem = element(choiceElem, XSD_ELEMENT);
-            final JsonNode refs = e.get(JSON_REF);
-            String fixRef = refs.asText().replace("#/definitions/", cfg.getNsAlias() + ":");
-            String name = fixRef.substring(cfg.getNsAlias().length() + 1);
-            nodeElem.setAttribute(FIELD_NAME, name);
-            nodeElem.setAttribute("type", fixRef);
-
-            neededElements.add(name);
+            final boolean isRef = e.get(JSON_REF) != null;
+            final String key = isRef
+                ? mapJsonRefToName(e.textValue(), cfg)
+                : String.format("item%s", i++);
+            nodeElem.setAttribute(FIELD_NAME, key);
+            final String xsfType = determineXsdType(cfg, "", e);
+            handleContent(neededElements, e, cfg, xsfType, nodeElem);
         }
     }
 
@@ -374,17 +407,40 @@ public class Jsons2Xsd
     {
         final JsonNode refs = val.get(JSON_REF);
         nodeElem.removeAttribute("type");
-        String fixRef = refs.asText().replace("#/definitions/", cfg.getNsAlias() + ":");
-        String name = fixRef.substring(cfg.getNsAlias().length() + 1);
+        String refPath = mapJsonRefToJsonPath(refs.asText(), cfg);
+        String type = mapJsonRefToXmlType(refs.asText(), cfg);
+        String name = mapJsonRefToName(refs.asText(), cfg);
         String oldName = nodeElem.getAttribute(FIELD_NAME);
 
-        if (oldName.trim().length() == 0)
+        // Resolve nested references
+        JsonNode resolvedNode = getNodeByPath(refPath, rootNode);
+        if (resolvedNode != null)
         {
-            nodeElem.setAttribute(FIELD_NAME, cfg.getItemNameMapper().apply(name));
+            handleContent(neededElements, resolvedNode, cfg, determineXsdType(cfg, name, resolvedNode), nodeElem);
         }
-        nodeElem.setAttribute("type", fixRef);
+        else
+        {
+            if (oldName.trim().length() == 0)
+            {
+                nodeElem.setAttribute(FIELD_NAME, cfg.getItemNameMapper().apply(name));
+            }
+            nodeElem.setAttribute("type", type);
 
-        neededElements.add(name);
+            neededElements.add(name);
+        }
+    }
+
+    private static JsonNode getNodeByPath(String path, JsonNode rootNode)
+    {
+        String[] parts = path.split("/");
+        JsonNode currentNode = rootNode;
+        for (String part : parts) {
+            if (currentNode == null) {
+                return null;
+            }
+            currentNode = currentNode.get(part);
+        }
+        return currentNode;
     }
 
     private static void handleString(Element nodeElem, JsonNode val)
@@ -525,7 +581,14 @@ public class Jsons2Xsd
 
     private static String determineXsdType(final Config cfg, String key, JsonNode node)
     {
-        final String jsonType = node.path("type").textValue();
+        final JsonNode typeNode = node.path("type");
+        final String jsonType = typeNode.isMissingNode()
+                ? "string"
+                : typeNode.isArray() && "null".equals(typeNode.get(0).textValue())
+                ? typeNode.get(1).textValue()
+                : typeNode.isArray()
+                ? typeNode.get(0).textValue()
+                : typeNode.textValue();
         final String jsonFormat = node.path("format").textValue();
         final boolean isEnum = node.get(TYPE_ENUM) != null;
         final boolean isRef = node.get(JSON_REF) != null;
@@ -627,5 +690,62 @@ public class Jsons2Xsd
             requiredList.add(requiredField.asText());
         }
         return requiredList;
+    }
+
+    // json schema objects can have special symbols in their names that does not support xsd
+    // so we need to map them to something that is valid
+    private static String mapName(String name)
+    {
+        if (name == null || name.trim().length() == 0)
+        {
+            return name;
+        }
+        return name.replaceAll("[^a-zA-Z0-9_]", "_");
+    }
+
+    private static String createPath(String parent, String name)
+    {
+        if (parent == null || parent.trim().isEmpty())
+        {
+            return name;
+        }
+        return parent + "_" + name;
+    }
+
+    private static String mapJsonRefToXmlType(String ref, Config cfg)
+    {
+        if (ref == null || ref.trim().isEmpty())
+        {
+            return ref;
+        }
+        String result = ref.replaceFirst("^" + cfg.getNsPrefix(), "")
+                .replaceFirst("#/definitions/", cfg.getNsAlias() + ":")
+                .replace("/", "_")
+                .replace("+", "_");
+        return result;
+    }
+    
+    private static String mapJsonRefToName(String ref, Config cfg)
+    {
+        if (ref == null || ref.trim().isEmpty())
+        {
+            return ref;
+        }
+        String result = ref.replaceFirst("^" + cfg.getNsPrefix(), "")
+                .replaceFirst("#/definitions/", "")
+                .replace("/", "_")
+                .replace("+", "_");
+        return result;
+    }
+
+    private static String mapJsonRefToJsonPath(String ref, Config cfg)
+    {
+        if (ref == null || ref.trim().isEmpty())
+        {
+            return ref;
+        }
+        String result = ref.replaceFirst("^" + cfg.getNsPrefix(), "")
+                .replaceFirst("#/definitions/", "");
+        return result;
     }
 }
